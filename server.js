@@ -14,6 +14,14 @@ function encrypt(text) {
     return iv.toString('hex') + ':' + cipher.getAuthTag().toString('hex') + ':' + enc;
 }
 
+function decrypt(text) {
+    const p = text.split(':');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', crypto.createHash('sha256').update(LINK_SECRET).digest(), Buffer.from(p[0], 'hex'));
+    decipher.setAuthTag(Buffer.from(p[1], 'hex'));
+    let dec = decipher.update(p[2], 'hex', 'utf8');
+    return dec + decipher.final('utf8');
+}
+
 function validateARL(arl) {
     return new Promise((resolve, reject) => {
         const body = JSON.stringify({ api_version: '1.0', api_token: 'null', input: '3', method: 'deezer.getUserData' });
@@ -34,7 +42,7 @@ function validateARL(arl) {
                         reject(new Error('Invalid ARL token'));
                     }
                 } catch(e) {
-                    reject(new Error('Parse error from Deezer'));
+                    reject(new Error('Parse error'));
                 }
             });
         });
@@ -44,10 +52,33 @@ function validateARL(arl) {
     });
 }
 
+function callDeezerApi(arl, endpoint, params = {}) {
+    return new Promise((resolve, reject) => {
+        const u = new URL(`https://api.deezer.com/${endpoint}`);
+        Object.keys(params).forEach(k => u.searchParams.append(k, params[k]));
+        
+        https.get(u, {
+            headers: { 'Cookie': `arl=${arl}`, 'User-Agent': 'Mozilla/5.0' }
+        }, res => {
+            let data = '';
+            res.on('data', c => data += c);
+            res.on('end', () => {
+                try {
+                    resolve(JSON.parse(data));
+                } catch(e) {
+                    reject(new Error('Deezer response parse error'));
+                }
+            });
+        }).on('error', reject);
+    });
+}
+
 const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    const u = new URL(req.url, `http://${req.headers.host}`);
-    
+    const host = req.headers['x-forwarded-host'] || req.headers.host;
+    const protocol = 'https';
+    const u = new URL(req.url, `${protocol}://${host}`);
+
     if (u.pathname === '/healthz') {
         res.writeHead(200, {'Content-Type': 'text/plain'});
         return res.end('OK');
@@ -67,8 +98,9 @@ const server = http.createServer(async (req, res) => {
                 if (!arl) throw new Error('ARL is required');
                 await validateARL(arl);
                 const enc = encrypt(arl);
+                const manifestUrl = `https://${host}/manifest.json?token=${encodeURIComponent(enc)}`;
                 res.writeHead(200, {'Content-Type': 'application/json'});
-                res.end(JSON.stringify({ manifestUrl: `${u.protocol}//${u.host}/manifest.json?token=${encodeURIComponent(enc)}` }));
+                res.end(JSON.stringify({ manifestUrl }));
             } catch(e) {
                 res.writeHead(400, {'Content-Type': 'application/json'});
                 res.end(JSON.stringify({ error: e.message }));
@@ -87,6 +119,58 @@ const server = http.createServer(async (req, res) => {
             quality: 'lossless',
             checkValidLossless: 0
         }));
+    }
+
+    if (u.pathname === '/search') {
+        try {
+            const token = u.searchParams.get('token');
+            const q = u.searchParams.get('q');
+            if (!token) throw new Error('Missing token');
+            const arl = decrypt(token);
+            const data = await callDeezerApi(arl, 'search/track', { q });
+
+            const tracks = (data.data || []).map(t => ({
+                id: t.id.toString(),
+                title: t.title,
+                artist: t.artist.name,
+                album: t.album.title,
+                duration: t.duration,
+                artworkURL: t.album.cover_medium || t.album.cover || '',
+                format: 'FLAC',
+                audioQuality: 'lossless'
+            }));
+
+            res.writeHead(200, {'Content-Type': 'application/json'});
+            return res.end(JSON.stringify({ tracks }));
+        } catch(e) {
+            res.writeHead(400, {'Content-Type': 'application/json'});
+            return res.end(JSON.stringify({ error: e.message }));
+        }
+    }
+
+    if (u.pathname.startsWith('/stream/')) {
+        try {
+            const trackId = u.pathname.split('/')[2];
+            const token = u.searchParams.get('token');
+            if (!token) throw new Error('Missing token');
+            const arl = decrypt(token);
+            const trackData = await callDeezerApi(arl, `track/${trackId}`);
+
+            res.writeHead(200, {'Content-Type': 'application/json'});
+            return res.end(JSON.stringify({
+                url: trackData.link || trackData.preview || '',
+                codec: 'flac',
+                container: 'flac',
+                manifest: 'none',
+                encrypted: false,
+                sampleRate: 44100,
+                bitDepth: 16,
+                bitrate: 1411
+            }));
+        } catch(e) {
+            res.writeHead(404, {'Content-Type': 'application/json'});
+            return res.end(JSON.stringify({ error: e.message }));
+        }
     }
 
     res.writeHead(404, {'Content-Type': 'application/json'});
