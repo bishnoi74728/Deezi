@@ -1,10 +1,10 @@
 services:
   - type: web
-    name: deezer-addon-maker
+    name: deezer-bitchord-addon
     env: node
     plan: free
-    buildCommand: ""
-    startCommand: "node server.js"
+    buildCommand: npm install
+    startCommand: npm start
     envVars:
       - key: LINK_SECRET
         generateValue: true
