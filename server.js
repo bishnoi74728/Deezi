@@ -1,24 +1,11 @@
 'use strict';
 
-/**
- * Deezer Addon Maker
- * Based on the working stateless architecture of the Tidal addon.
- */
 const http = require('node:http');
+const https = require('node:https');
 const crypto = require('node:crypto');
-const fs = require('node:fs');
-const path = require('node:path');
 
-const API = 'https://api.deezer.com';
-const PUBLIC_DIR = __dirname;
-
-class HttpError extends Error {
-    constructor(status, message, headers) {
-        super(message);
-        this.status = status;
-        this.headers = headers || {};
-    }
-}
+const PORT = process.env.PORT || 3000;
+const LINK_SECRET = process.env.LINK_SECRET || 'default_secret_key_change_me_32_bytes!!';
 
 function makeKey(secret) {
     return Buffer.from(crypto.hkdfSync('sha256', secret, 'deezer-addon-maker', 'link-v1', 32));
@@ -43,14 +30,14 @@ function unseal(key, blob) {
 function validateDeezerARL(arl) {
     return new Promise((resolve, reject) => {
         const body = JSON.stringify({ api_version: '1.0', api_token: 'null', input: '3', method: 'deezer.getUserData' });
-        const req = http.request({
+        const req = https.request({
             hostname: 'www.deezer.com',
             path: '/ajax/gw-light.php?method=deezer.getUserData&api_version=1.0&api_token=null&input=3',
             method: 'POST',
             headers: {
                 'Cookie': `arl=${arl}`,
                 'Content-Type': 'application/json',
-                'User-Agent': 'Mozilla/5.0'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
             }
         }, res => {
             let data = '';
@@ -61,42 +48,40 @@ function validateDeezerARL(arl) {
                     if (json && json.results && json.results.USER && json.results.USER.USER_ID) {
                         resolve(json.results.USER);
                     } else {
-                        reject(new HttpError(400, 'Invalid ARL token or expired session.'));
+                        reject(new Error('Invalid ARL token or expired session.'));
                     }
-                } catch {
-                    reject(new HttpError(400, 'Failed to parse Deezer response.'));
+                } catch(e) {
+                    reject(new Error('Failed to parse Deezer validation response.'));
                 }
             });
         });
-        req.on('error', () => reject(new HttpError(502, 'Could not reach Deezer')));
+        req.on('error', err => reject(err));
         req.write(body);
         req.end();
     });
 }
 
-function deezerGet(arl, endpoint, params = {}) {
+function callDeezerApi(arl, endpoint, params = {}) {
     return new Promise((resolve, reject) => {
-        const u = new URL(`${API}/${endpoint}`);
+        const u = new URL(`https://api.deezer.com/${endpoint}`);
         Object.keys(params).forEach(k => u.searchParams.append(k, params[k]));
-
-        const req = http.request({
-            hostname: u.hostname,
-            path: u.pathname + u.search,
-            method: 'GET',
-            headers: { 'Cookie': `arl=${arl}`, 'User-Agent': 'Mozilla/5.0' }
+        
+        https.get(u, {
+            headers: {
+                'Cookie': `arl=${arl}`,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+            }
         }, res => {
             let data = '';
             res.on('data', c => data += c);
             res.on('end', () => {
                 try {
                     resolve(JSON.parse(data));
-                } catch {
-                    reject(new HttpError(502, 'Deezer response parse error'));
+                } catch(e) {
+                    reject(new Error('Deezer API parse error'));
                 }
             });
-        });
-        req.on('error', () => reject(new HttpError(502, 'Could not reach Deezer')));
-        req.end();
+        }).on('error', reject);
     });
 }
 
@@ -124,142 +109,134 @@ function buildManifest(creds) {
     };
 }
 
-async function handleSearch(creds, sp) {
-    const q = (sp.get('q') || '').trim();
-    if (!q) return { tracks: [] };
-    
-    const data = await deezerGet(creds.a, 'search/track', { q: q.slice(0, 200) });
-    const raw = Array.isArray(data.data) ? data.data : [];
-
-    const tracks = raw.map(t => {
-        if (!t || !t.id || !t.title) return null;
-        return {
-            id: String(t.id),
-            title: t.title,
-            artist: t.artist ? t.artist.name : undefined,
-            album: t.album ? t.album.title : undefined,
-            duration: Number(t.duration) || undefined,
-            artworkURL: t.album && (t.album.cover_medium || t.album.cover) ? (t.album.cover_medium || t.album.cover) : undefined,
-            format: 'mp3',
-            audioQuality: 'HIGH',
-        };
-    }).filter(Boolean);
-
-    return { tracks };
-}
-
-async function handleStream(creds, id) {
-    if (!/^\d{1,20}$/.test(id)) throw new HttpError(404, 'Track not found');
-    const t = await deezerGet(creds.a, `track/${id}`);
-    if (!t || !t.id) throw new HttpError(404, 'Track not found');
-
-    const streamUrl = t.preview || '';
-    if (!streamUrl) throw new HttpError(404, 'No stream URL available');
-
-    return {
-        url: streamUrl,
-        codec: 'mp3',
-        container: 'mp3',
-        manifest: 'none',
-        encrypted: false,
-        sampleRate: 44100,
-        bitrate: 320000,
-        quality: 'High - MP3 320 kbps',
-    };
-}
-
-function originOf(req, publicUrl) {
-    if (publicUrl) return publicUrl;
+function originOf(req) {
     const host = String(req.headers['x-forwarded-host'] || req.headers.host || 'localhost').split(',')[0].trim();
-    const local = /^(localhost|127\.0\.0\.1|[::1])(:\d+)?$/.test(host);
-    const proto = String(req.headers['x-forwarded-proto'] || (local ? 'http' : 'https')).split(',')[0].trim();
+    const proto = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim();
     return `${proto}://${host}`;
 }
 
-async function generate(req, key, publicUrl) {
-    if (!key) throw new HttpError(500, 'The server is missing its APP_SECRET setting.');
-    const body = await readJson(req);
-    const arl = String(body.arl || '').trim();
-    if (!arl) throw new HttpError(400, 'Enter your Deezer ARL token.');
+const server = http.createServer(async (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-    const user = await validateDeezerARL(arl);
-    const creds = { u: user.USER_ID, a: arl };
-    const blob = seal(key, creds);
-    const link = `${originOf(req, publicUrl)}/a/${blob}/manifest.json`;
-    return { link, verified: true };
-}
+    if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        return res.end();
+    }
 
-function readJson(req, limit = 16 * 1024) {
-    return new Promise((resolve, reject) => {
-        const chunks = [];
-        let size = 0;
-        req.on('data', (c) => {
-            size += c.length;
-            if (size > limit) {
-                reject(new HttpError(413, 'Request too large'));
-                req.destroy();
-                return;
-            }
-            chunks.push(c);
-        });
-        req.on('end', () => {
+    const u = new URL(req.url, originOf(req));
+
+    if (u.pathname === '/healthz') {
+        res.writeHead(200, {'Content-Type': 'text/plain'});
+        return res.end('OK');
+    }
+
+    if (u.pathname === '/' || u.pathname === '/index.html') {
+        res.writeHead(200, {'Content-Type': 'text/html; charset=utf-8'});
+        return res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Deezer Addon Maker</title></head><body style="background:#121212;color:#fff;font-family:sans-serif;padding:40px;max-width:450px;margin:auto;"><h2>Deezer Addon Maker</h2><p style="color:#aaa;">Paste your Deezer ARL token below:</p><input id="arl" type="text" placeholder="Enter Deezer ARL token" style="width:100%;padding:12px;margin-bottom:15px;background:#222;border:1px solid #444;color:#fff;border-radius:4px;box-sizing:border-box;"><button onclick="gen()" style="width:100%;padding:12px;background:#1db954;color:#fff;border:none;font-weight:bold;border-radius:4px;cursor:pointer;">Generate Manifest Link</button><div id="err" style="color:#ff5252;margin-top:15px;font-size:14px;"></div><input id="link" readonly placeholder="Generated link will appear here" style="width:100%;padding:12px;margin-top:15px;background:#1a1a1a;border:1px solid #333;color:#1db954;border-radius:4px;box-sizing:border-box;display:none;"><script>async function gen(){let err=document.getElementById('err');let l=document.getElementById('link');err.innerText='';l.style.display='none';let res=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({arl:document.getElementById('arl').value})});let d=await res.json();if(d.link){l.value=d.link;l.style.display='block';}else{err.innerText=d.error||'Failed';}}</script></body></html>`);
+    }
+
+    if (u.pathname === '/api/generate' && req.method === 'POST') {
+        let body = '';
+        req.on('data', c => body += c);
+        req.on('end', async () => {
             try {
-                resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'));
-            } catch {
-                reject(new HttpError(400, 'Invalid request'));
+                const data = JSON.parse(body);
+                const arl = String(data.arl || '').trim();
+                if (!arl) throw new Error('ARL token is required');
+                
+                const user = await validateDeezerARL(arl);
+                const key = makeKey(LINK_SECRET);
+                const blob = seal(key, { u: user.USER_ID, a: arl });
+                const link = `${originOf(req)}/a/${blob}/manifest.json`;
+                
+                res.writeHead(200, {'Content-Type': 'application/json'});
+                res.end(JSON.stringify({ link }));
+            } catch(e) {
+                res.writeHead(400, {'Content-Type': 'application/json'});
+                res.end(JSON.stringify({ error: e.message }));
             }
         });
-        req.on('error', () => reject(new HttpError(400, 'Invalid request')));
-    });
-}
+        return;
+    }
 
-const SECURITY_HEADERS = {
-    'X-Content-Type-Options': 'nosniff',
-    'Referrer-Policy': 'no-referrer',
-    'Cache-Control': 'no-store',
-};
-
-function sendJson(res, status, obj, extra) {
-    res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type': 'application/json; charset=utf-8', ...(extra || {}) });
-    res.end(JSON.stringify(obj));
-}
-
-function send(res, status, body, type, extra) {
-    res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type': type, ...(extra || {}) });
-    res.end(body);
-}
-
-function createApp(opts = {}) {
-    const secret = opts.secret !== undefined ? opts.secret : process.env.APP_SECRET || '';
-    const publicUrl = (opts.publicUrl !== undefined ? opts.publicUrl : process.env.PUBLIC_URL || '').replace(/\/+$/, '');
-    const key = secret.length >= 16 ? makeKey(secret) : null;
-    
-    const cors = { 'Access-Control-Allow-Origin': '*' };
-
-    return http.createServer(async (req, res) => {
+    // Handle BitChord addon routes with /a/{blob}/... pattern matching Tidal architecture
+    const m = /^\/a\/([A-Za-z0-9_-]+)(?:\/(.*))?$/.exec(u.pathname);
+    if (m) {
+        const blob = m[1];
+        const rest = m[2] || '';
+        let creds;
         try {
-            const url = new URL(req.url, 'http://local');
-            const pathname = url.pathname;
+            const key = makeKey(LINK_SECRET);
+            creds = unseal(key, blob);
+        } catch {
+            res.writeHead(404, {'Content-Type': 'application/json'});
+            return res.end(JSON.stringify({ error: 'Invalid or expired addon link' }));
+        }
 
-            if (req.method === 'OPTIONS') {
-                return send(res, 204, '', 'text/plain', {
-                    ...cors,
-                    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-                    'Access-Control-Allow-Headers': 'Content-Type',
-                });
+        if (rest === '' || rest === 'manifest.json') {
+            res.writeHead(200, {'Content-Type': 'application/json'});
+            return res.end(JSON.stringify(buildManifest(creds)));
+        }
+
+        if (rest === 'search') {
+            try {
+                const q = u.searchParams.get('q');
+                const searchData = await callDeezerApi(creds.a, 'search/track', { q });
+                const raw = Array.isArray(searchData.data) ? searchData.data : [];
+
+                const tracks = raw.map(t => ({
+                    id: String(t.id),
+                    title: t.title,
+                    artist: t.artist ? t.artist.name : 'Unknown Artist',
+                    album: t.album ? t.album.title : 'Unknown Album',
+                    duration: Number(t.duration) || 0,
+                    artworkURL: t.album && (t.album.cover_medium || t.album.cover) ? (t.album.cover_medium || t.album.cover) : '',
+                    format: 'mp3',
+                    audioQuality: 'HIGH'
+                }));
+
+                res.writeHead(200, {'Content-Type': 'application/json'});
+                return res.end(JSON.stringify({ tracks }));
+            } catch(e) {
+                res.writeHead(400, {'Content-Type': 'application/json'});
+                return res.end(JSON.stringify({ error: e.message }));
             }
+        }
 
-            if (req.method === 'GET' && pathname === '/healthz') {
-                return send(res, 200, 'ok', 'text/plain; charset=utf-8');
+        if (rest.startsWith('stream/')) {
+            try {
+                const trackId = rest.split('/')[1];
+                const trackData = await callDeezerApi(creds.a, `track/${trackId}`);
+                if (!trackData || !trackData.id) throw new Error('Track not found');
+
+                res.writeHead(200, {'Content-Type': 'application/json'});
+                return res.end(JSON.stringify({
+                    url: trackData.preview || '',
+                    codec: 'mp3',
+                    container: 'mp3',
+                    manifest: 'none',
+                    encrypted: false,
+                    sampleRate: 44100,
+                    bitrate: 320000,
+                    quality: 'High - MP3 320 kbps'
+                }));
+            } catch(e) {
+                res.writeHead(404, {'Content-Type': 'application/json'});
+                return res.end(JSON.stringify({ error: e.message }));
             }
+        }
+    }
 
-            if (req.method === 'POST' && pathname === '/api/generate') {
-                return sendJson(res, 200, await generate(req, key, publicUrl));
-            }
+    res.writeHead(404, {'Content-Type': 'application/json'});
+    res.end(JSON.stringify({ error: 'Not Found' }));
+});
 
-            if (req.method === 'GET') {
-                if (pathname === '/') {
-                    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Deezer Addon Maker</title></head><body style="background:#121212;color:#fff;font-family:sans-serif;padding:40px;max-width:450px;margin:auto;"><h2>Deezer Addon Maker</h2><p style="color:#aaa;">Paste your Deezer ARL token:</p><input id="arl" type="text" placeholder="ARL token" style="width:100%;padding:10px;margin-bottom:10px;background:#222;border:1px solid #444;color:#fff;"><button onclick="gen()" style="width:100%;padding:10px;background:#1db954;color:#fff;border:none;cursor:pointer;font-weight:bold;">Generate link</button><input id="link" readonly style="width:100%;padding:10px;margin-top:15px;background:#1a1a1a;color:#1db954;border:1px solid #333;"><script>async function gen(){let res=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({arl:document.getElementById('arl').value})});let d=await res.json();if(d.link)document.getElementById('link').value=d.link;else alert(d.error||'Error');}</script></body></html>`;
+server.listen(PORT, () => {
+    console.log('Deezer addon server running on port ' + PORT);
+});
+sync function gen(){let res=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({arl:document.getElementById('arl').value})});let d=await res.json();if(d.link)document.getElementById('link').value=d.link;else alert(d.error||'Error');}</script></body></html>`;
                     return send(res, 200, html, 'text/html; charset=utf-8');
                 }
 
