@@ -4,28 +4,38 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Deezer Addon Maker for BitChord</title>
-    <link rel="stylesheet" href="app.css">
+    <link rel="stylesheet" href="/app.css">
 </head>
 <body>
     <div class="container">
-        <h1>Deezer Addon Maker</h1>
-        <p>Paste your Deezer ARL token below to generate your BitChord addon link.</p>
-        
-        <div class="form-group">
-            <label for="arl">Deezer ARL Token:</label>
-            <input type="text" id="arl" placeholder="Enter your ARL token">
-        </div>
-        
-        <button id="generateBtn">Generate Link</button>
-        
-        <div id="resultContainer" class="hidden">
-            <h3>Your Manifest Link:</h3>
-            <input type="text" id="manifestLink" readonly>
-            <button id="copyBtn">Copy Link</button>
-        </div>
-        
-        <div id="errorMsg" class="error hidden"></div>
+        <header>
+            <h1>Deezer Addon Maker</h1>
+            <p>Generate your custom BitChord source addon using your Deezer ARL token.</p>
+        </header>
+
+        <main>
+            <div class="card">
+                <div class="input-group">
+                    <label for="arlInput">Deezer ARL Token</label>
+                    <input type="password" id="arlInput" placeholder="Paste your 192-character ARL cookie here..." required>
+                    <small>How to get: Open Deezer web, log in, open DevTools (F12) -> Application -> Cookies -> copy the value of 'arl'.</small>
+                </div>
+
+                <button id="generateBtn" onclick="generateAddon()">Generate Addon Link</button>
+
+                <div id="errorMsg" class="error hidden"></div>
+
+                <div id="resultSection" class="hidden">
+                    <h3>Your BitChord Addon Link</h3>
+                    <p>Copy this link and paste it in BitChord under <strong>Settings &gt; Sources &gt; Add an addon</strong>.</p>
+                    <div class="copy-box">
+                        <input type="text" id="manifestLink" readonly>
+                        <button onclick="copyLink()">Copy</button>
+                    </div>
+                </div>
+            </div>
+        </main>
     </div>
-    <script src="app.js"></script>
+    <script src="/app.js"></script>
 </body>
 </html>
