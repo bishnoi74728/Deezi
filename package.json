@@ -1,0 +1,14 @@
+{
+  "name": "deezer-bitchord-addon",
+  "version": "1.0.0",
+  "description": "Deezer Addon Maker for BitChord",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {}
+}
