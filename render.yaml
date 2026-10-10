@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: deezer-addon-maker
+    env: node
+    plan: free
+    buildCommand: ""
+    startCommand: "node server.js"
+    envVars:
+      - key: LINK_SECRET
+        generateValue: true

@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deezer Addon Maker for BitChord</title>
+    <link rel="stylesheet" href="app.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Deezer Addon Maker</h1>
+        <p>Paste your Deezer ARL token below to generate your BitChord addon link.</p>
+        
+        <div class="form-group">
+            <label for="arl">Deezer ARL Token:</label>
+            <input type="text" id="arl" placeholder="Enter your ARL token">
+        </div>
+        
+        <button id="generateBtn">Generate Link</button>
+        
+        <div id="resultContainer" class="hidden">
+            <h3>Your Manifest Link:</h3>
+            <input type="text" id="manifestLink" readonly>
+            <button id="copyBtn">Copy Link</button>
+        </div>
+        
+        <div id="errorMsg" class="error hidden"></div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
