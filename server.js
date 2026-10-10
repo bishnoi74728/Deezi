@@ -146,4 +146,86 @@ const server = http.createServer(async (req, res) => {
         return;
     }
     if (pathname === '/app.css') {
-        fs.readFile(path.join(__dirname, 'app.css'), (err, data) =>
+        fs.readFile(path.join(__dirname, 'app.css'), (err, data) => {
+            if (err) { res.writeHead(404); res.end('Not Found'); }
+            else { res.writeHead(200, { 'Content-Type': 'text/css' }); res.end(data); }
+        });
+        return;
+    }
+
+    // API: Generate Encrypted Manifest Link
+    if (pathname === '/api/generate' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+            try {
+                const { arl } = JSON.parse(body);
+                if (!arl) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'ARL token is required' }));
+                    return;
+                }
+
+                // Validate ARL credentials using Deezer GW API
+                await validateDeezerARL(arl);
+
+                const encryptedToken = encrypt(arl);
+                const manifestUrl = `${parsedUrl.protocol}//${req.headers.host}/manifest.json?token=${encodeURIComponent(encryptedToken)}`;
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ manifestUrl }));
+            } catch (err) {
+                res.writeHead(401, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: err.message || 'Credential validation failed' }));
+            }
+        });
+        return;
+    }
+
+    // BitChord Addon Manifest Route
+    if (pathname === '/manifest.json') {
+        const tokenParam = parsedUrl.searchParams.get('token');
+        if (!tokenParam) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Missing token parameter' }));
+            return;
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            id: 'deezer-addon',
+            name: 'Deezer Addon (BitChord)',
+            version: '1.0.0',
+            resources: ['search', 'stream'],
+            quality: 'lossless',
+            checkValidLossless: 0
+        }));
+        return;
+    }
+
+    // Search Route
+    if (pathname === '/search') {
+        const tokenParam = parsedUrl.searchParams.get('token');
+        const query = parsedUrl.searchParams.get('q');
+        try {
+            if (!tokenParam) throw new Error('Missing token');
+            const arl = decrypt(tokenParam);
+            const searchRes = await callDeezer(arl, 'search/track', { q: query || '' });
+
+            const tracks = (searchRes.data || []).map(track => ({
+                id: track.id.toString(),
+                title: track.title,
+                artist: track.artist.name,
+                album: track.album.title,
+                duration: track.duration,
+                artworkURL: track.album.cover_medium || track.album.cover || '',
+                format: 'FLAC',
+                audioQuality: 'lossless'
+            }));
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ tracks }));
+        } catch (err) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+        }
