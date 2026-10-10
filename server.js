@@ -1,8 +1,6 @@
 const http = require('http');
-const https = https || require('https');
+const https = require('https');
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
 
 const PORT = process.env.PORT || 3000;
 const LINK_SECRET = process.env.LINK_SECRET || 'secretkey32byteslongencryptionkey!!';
@@ -14,14 +12,6 @@ function encrypt(text) {
     let enc = cipher.update(text, 'utf8', 'hex');
     enc += cipher.final('hex');
     return iv.toString('hex') + ':' + cipher.getAuthTag().toString('hex') + ':' + enc;
-}
-
-function decrypt(text) {
-    const p = text.split(':');
-    const decipher = crypto.createDecipheriv('aes-256-gcm', crypto.createHash('sha256').update(LINK_SECRET).digest(), Buffer.from(p[0], 'hex'));
-    decipher.setAuthTag(Buffer.from(p[1], 'hex'));
-    let dec = decipher.update(p[2], 'hex', 'utf8');
-    return dec + decipher.final('utf8');
 }
 
 function validateARL(arl) {
@@ -38,12 +28,17 @@ function validateARL(arl) {
             res.on('end', () => {
                 try {
                     const json = JSON.parse(data);
-                    if (json && json.results && json.results.USER && json.results.USER.USER_ID) resolve(json.results.USER);
-                    else reject(new Error('Invalid ARL'));
-                } catch(e) { reject(new Error('Parse error')); }
+                    if (json && json.results && json.results.USER && json.results.USER.USER_ID) {
+                        resolve(json.results.USER);
+                    } else {
+                        reject(new Error('Invalid ARL token'));
+                    }
+                } catch(e) {
+                    reject(new Error('Parse error from Deezer'));
+                }
             });
         });
-        req.on('error', reject);
+        req.on('error', err => reject(err));
         req.write(body);
         req.end();
     });
@@ -54,18 +49,22 @@ const server = http.createServer(async (req, res) => {
     const u = new URL(req.url, `http://${req.headers.host}`);
     
     if (u.pathname === '/healthz') {
-        res.writeHead(200); return res.end('OK');
+        res.writeHead(200, {'Content-Type': 'text/plain'});
+        return res.end('OK');
     }
+
     if (u.pathname === '/' || u.pathname === '/index.html') {
         res.writeHead(200, {'Content-Type': 'text/html'});
-        return res.end(`<!DOCTYPE html><html><head><title>Deezer Addon</title></head><body style="background:#121212;color:#fff;font-family:sans-serif;padding:30px;"><h2>Deezer Addon Maker</h2><input id="a" type="text" placeholder="Paste ARL" style="width:100%;padding:10px;margin-bottom:10px;"><button onclick="gen()" style="width:100%;padding:10px;background:#1db954;color:#fff;border:none;">Generate</button><input id="r" readonly style="width:100%;padding:10px;margin-top:10px;"><script>async function gen(){let res=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({arl:document.getElementById('a').value})});let d=await res.json();if(d.manifestUrl)document.getElementById('r').value=d.manifestUrl;else alert(d.error);}</script></body></html>`);
+        return res.end(`<!DOCTYPE html><html><head><title>Deezer Addon Maker</title></head><body style="background:#121212;color:#fff;font-family:sans-serif;padding:40px;max-width:500px;margin:auto;"><h2>Deezer Addon Maker</h2><p style="color:#aaa;">Paste your Deezer ARL token below:</p><input id="a" type="text" placeholder="Paste ARL token here" style="width:100%;padding:12px;margin-bottom:15px;background:#222;border:1px solid #444;color:#fff;border-radius:4px;box-sizing:border-box;"><button onclick="gen()" style="width:100%;padding:12px;background:#1db954;color:#fff;border:none;font-weight:bold;border-radius:4px;cursor:pointer;">Generate Manifest Link</button><div id="err" style="color:#ff5252;margin-top:15px;font-size:14px;"></div><input id="r" readonly placeholder="Generated Link will appear here" style="width:100%;padding:12px;margin-top:15px;background:#1a1a1a;border:1px solid #333;color:#1db954;border-radius:4px;box-sizing:border-box;display:none;"><script>async function gen(){let err=document.getElementById('err');let r=document.getElementById('r');err.innerText='';r.style.display='none';let res=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({arl:document.getElementById('a').value})});let d=await res.json();if(d.manifestUrl){r.value=d.manifestUrl;r.style.display='block';}else{err.innerText=d.error||'Failed';}}</script></body></html>`);
     }
+
     if (u.pathname === '/api/generate' && req.method === 'POST') {
         let body = '';
         req.on('data', c => body += c);
         req.on('end', async () => {
             try {
                 const { arl } = JSON.parse(body);
+                if (!arl) throw new Error('ARL is required');
                 await validateARL(arl);
                 const enc = encrypt(arl);
                 res.writeHead(200, {'Content-Type': 'application/json'});
@@ -77,12 +76,23 @@ const server = http.createServer(async (req, res) => {
         });
         return;
     }
+
     if (u.pathname === '/manifest.json') {
         res.writeHead(200, {'Content-Type': 'application/json'});
-        return res.end(JSON.stringify({ id: 'deezer', name: 'Deezer Addon', version: '1.0.0', resources: ['search', 'stream'], quality: 'lossless' }));
+        return res.end(JSON.stringify({
+            id: 'deezer-addon',
+            name: 'Deezer Addon (BitChord)',
+            version: '1.0.0',
+            resources: ['search', 'stream'],
+            quality: 'lossless',
+            checkValidLossless: 0
+        }));
     }
-    res.writeHead(404);
-    res.end('Not Found');
+
+    res.writeHead(404, {'Content-Type': 'application/json'});
+    res.end(JSON.stringify({ error: 'Not Found' }));
 });
 
-server.listen(PORT, () => console.log('Running on port ' + PORT));
+server.listen(PORT, () => {
+    console.log('Server running on port ' + PORT);
+});
